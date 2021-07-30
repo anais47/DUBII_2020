@@ -6,8 +6,8 @@ Exams reports from the Diplome Universitaire en Bioinformatique Integrative (202
 
 	+ Module "Outils bioinformatiques"
 
-	+ Module "R & biostatistiques pour des données *omiques*"
+	+ Module "R & biostatistiques pour des données *omiques* "
 
 	+ Module "Python"
 
-More details on the training here : https://du-bii.github.io/accueil/  
+More details on the training here I have followed : https://du-bii.github.io/accueil/  
