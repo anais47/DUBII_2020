@@ -1,0 +1,633 @@
+---
+title: "Module 6 exam"
+author: "AnaïsRey"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: pdf_document
+geometry: margin=1cm
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+tidy.opts=list(width.cutoff=50))
+```
+
+**Consigne**
+Vous fournirez un rapport au format pdf généré à partir d’un Rmd (envoyez-nous les 2 fichiers, Rmd et pdf, avec comme nom de fichier “NOM-PRENOM_evaluation-m6-2020” + .Rmd ou .pdf), avec une page d’introduction et deux figures maximum par analyse. Vos travaux doivent être reproductibles, pensez à décrire et justifier les différentes étapes, seuils, extractions … Bon courage ! Nous sommes disponibles sur Slack en cas de besoin.
+
+https://docs.google.com/document/d/1bjA3WJBF_-rqIV6CUzdRtfrLRSqhVRuLzc8jU1T7aUw/edit#
+
+# Load packages
+
+```{r, include=FALSE}
+
+message("Loading required libraries")
+
+requiredLib <- c("knitr", "tibble", "DESeq2", "limma", "edgeR", "tidyr", "pheatmap", "WGCNA", "DescTools", "mixKernel","mixOmics", "dplyr" )
+  
+for (lib in requiredLib) {
+  if (!require(lib, character.only = TRUE)) {
+    install.packages(lib, )
+  }
+  require(lib, character.only = TRUE)
+}
+```
+
+# Import the data from the FA model experiment
+
+```{r}
+## Set path to files
+
+path <- "/shared/data/projects/dubii2020/data/hbc-MouseKidneyFibrOmics-a39e55a/tables/"
+
+## Get the raw count table from the transcriptomic datataset
+trans.count.raw <- read.csv(file=paste(path, "fa/results/counts/raw_counts.csv.gz",
+                                       sep=""),
+                            header=TRUE)
+
+## Get the Transcripts Per Million normalized count table from the transcriptomic datataset 
+trans.count.tpm <- read.csv(file=paste(path, "fa/results/counts/tpm.csv.gz", sep=""),
+                            header=TRUE)
+
+# Get the raw count table from the proteomic dataset
+proteo.count.raw <- read.csv(file=paste(path, "pfa/results/counts/fa_model_counts.csv", sep=""),
+                            header=TRUE)
+```
+
+# Introduction
+
+## Summary of the datasets 
+
+We are working on two omics datasets: one from transcriptomic experiment and one from proteomic experiment. Both are coming from the same experiment where kidneys of mouses with reversible chemicalfolic acid (FA) induced nephropathy were taken at different times of the treatment (day 0 and several days after the injection) and RNA and protein isolations were performed. 
+
+1) Look at the dimension and the contents of each table:
+```{r}
+dim(trans.count.raw)
+head(trans.count.raw)[1:7]
+
+dim(proteo.count.raw)
+head(proteo.count.raw)[1:7]
+```
+
+There is `r dim(trans.count.raw)[1]` rows that correspond to genes and `r dim(trans.count.raw)[2] - 1` columns that correspond to samples in the count table coming from the transcriptomic dataset.
+
+There is `r dim(proteo.count.raw)[1]` rows that correspond to proteins and `r dim(proteo.count.raw)[2] - 1` columns that correspond to samples in the count table coming from the proteomic dataset.
+
+2) We build a metadata table that will be needed for the analysis of the report
+
+```{r}
+get_metaD <- function (x,y){
+  
+  ## We build the metadata table by adding the type of dataset, 
+  ## the names of sample, the condition of sample and sample number
+  
+  metadata <- data.frame(
+  dataType = y,
+  sampleName = colnames(x[-1]))
+  
+  metadata <- metadata %>% 
+  separate(sampleName, c("condition", "sampleNumber"), remove=F)
+  
+  ## We transform into factor "condition" and "sampleNumber" 
+  metadata$condition <-
+    factor(metadata$condition)
+  metadata$sampleNumber <-
+    factor(metadata$sampleNumber)
+  
+  ## We specify a Color per condition and we add the color column to the metadata table
+  colPerCondition <- c(normal = "#BBFFBB",
+                     day1 = "#FFFFDD", 
+                     day2 = "#FFDD88", 
+                     day3 = "#FFBB44", 
+                     day7 = "#FF8800",
+                     day14 = "#FF4400")
+
+  metadata$color <- colPerCondition[metadata$condition]
+
+return(metadata)
+}
+
+trans.metadata <- get_metaD(x=trans.count.raw, y="transcriptome")
+proteo.metadata <- get_metaD(x=proteo.count.raw, y="proteome")
+```
+
+
+```{r}
+kable(trans.metadata, caption="metadata from the transcriptomic dataset")
+kable(proteo.metadata, caption="metadata from the proteomic dataset")
+```
+
+
+There are some differences between the two omic datasets: 
+  
+  + For each sample, 3 replicates were performed for the transcriptomic dataset whereas only 2 were performed for the proteomic dataset. 
+  
+  + Day 3 was not sampled and/or prepared for the proteomic dataset
+  
+  
+3) Before starting we put the gene ID as rownames
+
+```{r}
+# For transcriptomic count tables, 
+# one gene = one row so we can just rename
+# the rownames by taking the column "rowname"
+trans.count.raw <- trans.count.raw %>% column_to_rownames(var="rowname")
+trans.count.tpm <- trans.count.tpm %>% column_to_rownames(var="rowname")
+
+# For proteomic data, there are several rows 
+# with the same protein name, 
+# so to "trick" and use the name of the protein as a rowname, 
+# I added to each protein the number of the row 
+
+proteo.count.raw$nb_row <- 1:nrow(proteo.count.raw)
+
+proteo.count.raw <- proteo.count.raw %>% 
+  unite("rowname", id, nb_row) %>%
+    column_to_rownames(var="rowname")
+```
+
+4) We round the raw data as advised in the slack as it seems that the data were already normalized in some way
+
+```{r}
+trans.count.raw.arr <- round(trans.count.raw, 0)
+trans.count.raw.arr <- as.matrix(trans.count.raw.arr)
+
+proteo.count.raw.arr <- round(proteo.count.raw, 0)
+proteo.count.raw.arr <- as.matrix(proteo.count.raw.arr)
+```
+
+
+# Analyse d'expression différentielle
+## Transcriptomic data
+
+Enoncé: Analyse d’expression différentielle pour les données de protéomique et transcriptomique => identifier les gènes/protéines significativement différentiellement exprimés dans le modèle FA en comparant Day 7 à Day 0. 
+
+### Genes filtering
+
+We keep only a set of expressed genes by using those with a transcripts per million normalized counts >=1 in at least one sample 
+
+```{r}
+## Expressed genes
+nbexpr <- apply(trans.count.tpm, 1, function(x){length(which(x>=1))})
+isexpr <- which(nbexpr>=1)
+trans.count.raw.filtered <- trans.count.raw.arr[isexpr,]
+
+dim(trans.count.raw.arr)
+dim(trans.count.raw.filtered)
+
+## We remove genes with less than 10 reads in total as we 
+# want to filter out the genes with very low counts in all conditions
+undetectedFeatures <- apply(trans.count.raw.filtered, MARGIN = 1, FUN = sum) < 10
+
+trans.count.raw.filtered <- trans.count.raw.filtered[!undetectedFeatures, ]
+
+dim(trans.count.raw.filtered)
+```
+
+
+### Library size normalization with edgeR
+
+```{r}
+## We create a DGEList object from the count table 
+# and give the group indicator for each column 
+# (here the condition column)
+
+trans.dge <- DGEList(counts=trans.count.raw.filtered,
+                     group=trans.metadata$condition)
+
+## We remove genes that are lowly expressed
+keep.exprs <- filterByExpr(trans.dge)
+trans.dge.nolow <- trans.dge[keep.exprs,, keep.lib.sizes=FALSE]
+
+## We estimate the factor normalization based on the TMM method
+trans.dge.nolow <- calcNormFactors(trans.dge.nolow , method="TMM")
+
+# Important : using calcNormFactors does not change the counts, 
+# it just updates the column norm.factors
+trans.count.norm <- cpm(trans.dge.nolow, log=TRUE)
+
+``` 
+
+
+```{r}
+# We look at the impact of normalization on data
+par(mar = c(4, 6, 5, 1))
+par(mfrow = c(1,2))
+boxplot(trans.count.raw.arr, col=trans.metadata$color, 
+        horizontal = TRUE, 
+        las = 1, 
+        main = "Raw values", 
+        xlab = "Raw value")
+
+boxplot(trans.count.norm, col=trans.metadata$color, 
+        horizontal = TRUE, 
+        las = 1, 
+        main = "Normalized values", 
+        xlab = "Log2-CPM values")
+```
+
+
+### Differential analysis with limma
+
+```{r}
+## Voom transformation of normalized data to apply the limma statistical framework
+design <- model.matrix(~ 0 + condition, data=trans.metadata)
+v <- voom(trans.dge.nolow, design, plot=FALSE)
+
+# Differential analysis based on 'limma'
+fit <- lmFit(v, design)
+
+## Compare Condition normal with the one ater 7 days
+contrast <-makeContrasts(conditionnormal - conditionday7, levels=design)
+
+## Run test
+fit2 <- contrasts.fit(fit, contrast)
+fit2 <- eBayes(fit2)
+
+## Extract the results
+res <- topTable(fit2, number=1e6, adjust.method="BH")
+
+## Pvalue distribution
+hist(res$P.Value, main="Pvalue histogram", col="grey50", border="white")
+
+## Extract list of DEG
+idx.sign <- which(res$adj.P.Val < 0.05 & 
+                    abs(res$logFC) > 1)
+deg <- rownames(res[idx.sign,])
+
+# Heatmap of the 50 most differentially expressed genes
+idx.sub <- which(trans.metadata$condition=="normal" | trans.metadata$condition=="day7")
+data.sub <- trans.count.norm[deg[1:50],idx.sub]
+pheatmap(data.sub, 
+        cutree_cols = 2,
+        show_rownames=FALSE)
+```
+
+## Proteomic data
+### Proteins filtering
+
+```{r}
+
+## We remove proteins with less than 10 counts in total as we 
+# want to filter out the proteins with very low counts in all conditions
+undetectedFeatures <- apply(proteo.count.raw.arr, MARGIN = 1, FUN = sum) < 10
+
+proteo.count.raw.filtered <- proteo.count.raw.arr[!undetectedFeatures, ]
+
+dim(proteo.count.raw.arr)
+dim(proteo.count.raw.filtered)
+```
+
+
+### Library size normalization with edgeR
+
+```{r}
+## We create a DGEList object from the count table and
+# give the group indicator for each column 
+# (here the condition column)
+
+proteo.dge <- DGEList(counts=proteo.count.raw.filtered,
+                     group=proteo.metadata$condition)
+
+## We remove genes that are lowly expressed
+keep.exprs <- filterByExpr(proteo.dge)
+proteo.dge.nolow <- proteo.dge[keep.exprs,, keep.lib.sizes=FALSE]
+
+## We estimate the factor normalization based on the TMM method
+proteo.dge.nolow <- calcNormFactors(proteo.dge.nolow , method="TMM")
+
+# Important : using calcNormFactors does not change the counts, 
+# it just updates the column norm.factors
+proteo.count.norm <- cpm(proteo.dge.nolow, log=TRUE)
+
+``` 
+
+
+```{r}
+# We look at the impact of normalization on data
+par(mar = c(4, 6, 5, 1))
+par(mfrow = c(1,2))
+boxplot(proteo.count.raw.arr, col=proteo.metadata$color, 
+        horizontal = TRUE, 
+        las = 1, 
+        main = "Raw values", 
+        xlab = "Raw value")
+
+boxplot(proteo.count.norm, col=proteo.metadata$color, 
+        horizontal = TRUE, 
+        las = 1, 
+        main = "Normalized values", 
+        xlab = "Log2-CPM values")
+dev.off()
+```
+
+
+### Differential analysis with limma
+
+```{r}
+## Voom transformation of normalized data to apply the limma statistical framework
+design <- model.matrix(~ 0 + condition, data=proteo.metadata)
+v <- voom(proteo.dge.nolow, design, plot=FALSE)
+
+# Differential analysis based on 'limma'
+fit <- lmFit(v, design)
+
+## Compare Condition normal with the one ater 7 days
+contrast <-makeContrasts(conditionnormal - conditionday7, levels=design)
+
+## Run test
+fit2 <- contrasts.fit(fit, contrast)
+fit2 <- eBayes(fit2)
+
+## Extract the results
+res <- topTable(fit2, number=1e6, adjust.method="BH")
+
+## Pvalue distribution
+hist(res$P.Value, main="Pvalue histogram", col="grey50", border="white")
+
+## Extract list of DEG
+idx.sign <- which(res$adj.P.Val < 0.05 & 
+                    abs(res$logFC) > 1)
+deg <- rownames(res[idx.sign,])
+
+# Heatmap of the 50 most differentially expressed proteins
+idx.sub <- which(proteo.metadata$condition=="normal" | proteo.metadata$condition=="day7")
+
+data.sub <- proteo.count.norm[deg[1:50],idx.sub]
+
+pheatmap(data.sub, 
+        cutree_cols = 2,
+        show_rownames=FALSE)
+```
+
+
+
+# Analyse multi-omique
+
+Analyse multi-omique (transcripto + protéo) avec, au choix, MOFA, mixOmics, mixKernel ou d’autres outils de factorisation multi-matrices. Vous pouvez soit focaliser sur un time point, soit intégrer les différents time points.
+
+I decided to use mixKernel
+
+## Normalization of datasets
+
+We already normalized the two datasets in the first part of the report so I will used those datasets
+
+```{r}
+# We check the dimensions of the transcripto and proteo dataset
+dim(trans.count.norm) # we have 18465 genes for 18 samples
+dim(proteo.count.norm) # we have 8044 proteins for 10 samples
+```
+
+## Filter dataset
+
+I decided to integrate different time point but I need to remove the samples that were not done for both datasets: Day 3  and each third replicate for each sample was not sampled and/or prepared for the proteomic dataset.
+
+```{r}
+# samples for transcripto dataset
+colnames(trans.count.norm) 
+# samples for proteo dataset --> 
+# we are going to subset the transcripto dataset 
+# with the samples found in the proteo dataset to have the
+# same samples in both dataset
+
+col_tokeep <- colnames(proteo.count.norm)  
+trans.filt <- as.data.frame(trans.count.norm) %>% dplyr::select(any_of(col_tokeep))
+
+colnames(trans.filt) == col_tokeep
+```
+
+
+## Multiple kernel computation
+### Individual kernel computation
+
+We build individiual kernel for each dataset
+```{r}
+# First, we transpose the datasets as compute.kernel needs the dataframe with
+# conditions as rows and genes as columns
+trans.filt.t <- t(trans.filt)
+proteo.kernel.t <- t(proteo.count.norm)
+
+# Then, we compute each kernel using the linear function as datasets were normalized
+trans.kernel <- compute.kernel(trans.filt.t, kernel.func = "linear")
+proteo.kernel <- compute.kernel(t(proteo.count.norm), kernel.func = "linear")
+
+# check dimensions
+dim(trans.kernel$kernel)
+dim(proteo.kernel$kernel)
+
+# A general overview of the correlation structure between datasets
+cim.kernel(trans = trans.kernel,
+           proteo = proteo.kernel, 
+           method = "square")
+```
+
+It seems that both datasets are positively and strongly correlated
+
+### Combined kernel computation
+
+We combined the created kernels for the methof full-UMKL, this method computes a kernel that minimizes the distortion between tht two imput kernels. 
+
+```{r}
+meta.kernel <- combine.kernels(trans = trans.kernel,
+                               proteo = proteo.kernel, 
+                               method = "full-UMKL")
+```
+
+### Exploratory analysis with KPCA
+
+We do a KPCA for the 10 first most important components
+```{r}
+kernel.pca.result <- kernel.pca(meta.kernel, ncomp = 10)
+ 
+```
+
+With the two first axes, we summarize `r round(kernel.pca.result$cum.var[2], 2)` of explained variances as we can see on the plot of eigen values:
+
+```{r}
+plot(kernel.pca.result)
+```
+
+We plot the two first axes of the KPCA with the function of mixOmics
+
+```{r}
+# We retrieve metadata related to the samples
+metaD_forPCA <- rownames(kernel.pca.result$X) %>% 
+  as.data.frame() %>%
+  rename(sampleName=".") %>%
+  inner_join(proteo.metadata)
+
+plotIndiv(kernel.pca.result,
+          comp = c(1, 2),
+          ind.names = TRUE,
+          group= as.vector(metaD_forPCA$condition))
+```
+
+
+
+# Construction de réseau avec WGCNA
+
+Consigne : Reconstruct the co-expression network from all the time points of the FA transcriptomics data. 
+
+## Filter 
+Propose to filter and remove all the zero expressed genes, the NAs and the less informative genes from the transcriptomics data. (I remove all the genes that are not expressed in at least 9 out of the 18 conditions (expression > 1 TPM in 9) and then filter with the coefficient of variation > 0.75).
+
+```{r}
+# we look at the dimension of the expression data
+head(trans.count.tpm)
+dim(trans.count.tpm)
+
+# we have 46679 genes and 18 samples
+
+# we remove zeros and NAs
+faD <- trans.count.tpm[apply(trans.count.tpm, 1, function(row) all(row !=0 )), ]
+faD <- faD[complete.cases(faD),]
+
+# small quality control of WGCNA
+gsgFA = goodSamplesGenes(faD, verbose = 3)
+gsgFA$allOK # all genes are OK we can pursue
+
+# We keep only informative genes so we decided 
+# to remove genes which are not expressed in at least
+# 9 out of the 18 conditions (expression > 1 TPM in 9)
+# and then filter with the coefficient of variation > 0.75
+
+faD <- faD[apply(faD, 1, sum) >= 9,]
+faD <- faD[apply(faD, 1, CoefVar) >= 0.75, ]
+
+dim(faD) # we have now 4530 genes that will be used in the network 
+
+# We transpose the dataframe as WGCNA needs the dataframe with
+# conditions as rows and genes as columns
+faD.t <- t(faD)
+head(faD.t)[,1:2] # we look at the first columns to check 
+dim(faD.t)
+```
+
+
+## Network reconstruction
+Then apply the first part of the network reconstruction steps as we saw them on the WGCNA course until the module predictions.
+Instead of using WGCNA’s module prediction routines, apply a universal threshold of 0.5 on the adjacency matrix, and obtain an adjacency matrix that is reduced in size. This is the network. 
+
+### Choice of the soft-thresholding power
+
+We first identify the soft-thresholding power to which co-expression similarity is raised to calculate adjacency 
+
+```{r}
+## Chose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+# Call the network topology analysis function
+sft = pickSoftThreshold(faD.t, powerVector = powers, verbose = 5)
+# Plot the results:
+par(mfrow = c(1,2));cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+
+```
+
+We choose the power 8, which is the lowest power for which the scale-free topology fit index reaches 0.90.
+
+### Build network and module detection
+```{r}
+### -- we build the network and detect module using
+# an automatic block-wise network construction and
+# module detection method 
+# we choose the mimnimum module size relatively high 
+# (here 30) as it is better to have large modules 
+
+cor <- WGCNA::cor # to avoid conflict with other packages (https://programmersought.com/article/90752004413/)
+
+net = blockwiseModules(faD.t, power = 8,
+                       TOMType = "unsigned", minModuleSize = 30,
+                       reassignThreshold = 0, mergeCutHeight = 0.25,
+                       numericLabels = TRUE, pamRespectsDendro = FALSE,
+                       saveTOMs = TRUE,
+                       verbose = 3)
+
+### -- We have a look at the detected modules 
+table(net$colors)
+```
+
+We see we have 17 modules (from 1 to 18 with the 1 with the highest number of genes and the last one the lowest number of genes), the label 0 indicates that 12 genes are not associated to a specific module. 
+
+To visualize the relationship between genes clustering and detected modules (ie to see where the "cutting the branches" of the gene tree was perfomed with the blockwiseModules), we perform the hierarchical clustering tree and add below the modules (each module has its specific color). 
+
+```{r}
+### -- We have a look at the gene tree and the associated modules 
+# Convert labels to colors for plotting
+mergedColors = labels2colors(net$colors)
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+
+# save some results
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+MEs = net$MEs
+geneTree = net$dendrograms[[1]]
+```
+
+### Export network to Cytoscape
+
+```{r}
+# --- We prepare the dataframe needed to create the network 
+# that will be imported into Cytoscape
+
+# We frst recalculate the topological overlap 
+TOM = TOMsimilarityFromExpr(faD.t, power = 8)
+
+geneNames <- rownames(faD)
+
+# We select the modules
+# We choose 5 modules by selecting the bigger ones and 
+# also by not taking into account the one (grey color) that contains all the not-assigned genes
+
+mods <- c("turquoise", "blue","brown","yellow","green")
+inModule <- is.finite(match(moduleColors, mods))
+modGenes <- geneNames[inModule]
+modTOM <- TOM[inModule, inModule]
+dimnames(modTOM) <- list(modGenes, modGenes)
+
+# In order to reduce the adjaceny matrix, we apply a 
+# universal threshold of 0.25 on the adjacency matrix
+
+cyt = exportNetworkToCytoscape(modTOM, 
+                               edgeFile = paste("CytoscapeInput-edges-0.25", 
+                                                paste(mods, collapse="-"), ".txt", sep=""),
+                               nodeFile = paste("CytoscapeInput-nodes-0.25", 
+                                                paste(mods, collapse="-"), ".txt", sep=""),
+                               threshold = 0.25,
+                               altNodeNames = modGenes,
+                               nodeAttr = moduleColors[inModule])
+```
+
+Import it to Cytoscape with aMatReader plugin.
+Visualize, analyze the network and superimpose the proteomics data on it.
+
+# Color reseau cytoscpae
+
+Colorez dans le réseau choisi les noeuds en fonction des données de protéomiques avec un gradient de couleur correspondant au fold-change des données de protéomique.
+
+Here my network where I decrease the option threshold to 0.25 in exportNetworkToCytoscape function to have some modules which were connected. To be honest, I am not sure of what I did, I just surimposed the proteimic dataat and changed the color in function of fold-change, I did not try to "arrange" or "make more readable" the network. 
+
+![](./CytoscapeInput-edges-0.25turquoise-blue-brown-yellow-green.txt.png)
+
+
+# R session info
+
+```{r}
+sessionInfo()
+```
